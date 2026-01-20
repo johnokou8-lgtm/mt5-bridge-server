@@ -1,35 +1,28 @@
-# server.py - FastAPI server for MT5 bridge
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 import uvicorn
+from datetime import datetime
 import json
 import os
-from datetime import datetime
-import hashlib
 
-app = FastAPI(title="MT5 Bridge Server", version="1.0")
+app = FastAPI(title="MT5 Bridge", description="Connect MT5 to Mobile App", version="1.0")
 
-# CORS for mobile app
+# Allow all origins (for testing)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your app's domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory storage (for testing)
-# In production, connect to Supabase
-storage = {
+# Store data in memory
+trading_data = {
     "accounts": {},
     "trades": [],
     "commands": [],
     "heartbeats": {}
 }
-
-# Simple authentication (replace with Supabase in production)
-API_KEYS = {}
 
 @app.get("/")
 async def root():
@@ -40,59 +33,37 @@ async def root():
         "version": "1.0",
         "timestamp": datetime.now().isoformat(),
         "endpoints": {
-            "POST /api/mt5/update": "MT5 EA sends data",
-            "GET /api/mt5/status": "Mobile app fetches data",
-            "POST /api/mt5/command": "Mobile app sends commands",
-            "GET /api/mt5/heartbeat": "Check server health"
+            "GET /": "This health check",
+            "POST /api/mt5": "MT5 EA sends data here",
+            "GET /api/mt5": "Mobile app fetches data",
+            "POST /api/command": "Send command to EA",
+            "GET /api/commands": "EA polls for commands"
         }
     }
 
-@app.get("/api/mt5/heartbeat")
-async def heartbeat():
-    """Server health check"""
-    return {
-        "status": "alive",
-        "timestamp": datetime.now().isoformat(),
-        "accounts_count": len(storage["accounts"]),
-        "trades_count": len(storage["trades"])
-    }
-
-@app.post("/api/mt5/update")
-async def receive_mt5_update(request: Request):
-    """MT5 EA sends trading data here"""
+@app.post("/api/mt5")
+async def receive_mt5_data(request: Request):
+    """MT5 EA sends updates to this endpoint"""
     try:
         data = await request.json()
         
-        # Required fields
+        # Validate required fields
         if "account" not in data:
-            raise HTTPException(400, "Missing 'account' field")
+            raise HTTPException(status_code=400, detail="Missing 'account' field")
         
         account_id = str(data["account"])
         
-        # Store/update account data
-        storage["accounts"][account_id] = {
+        # Store account data
+        trading_data["accounts"][account_id] = {
             **data,
             "last_update": datetime.now().isoformat(),
-            "server_received_at": datetime.now().timestamp()
+            "server_timestamp": datetime.now().timestamp()
         }
         
-        # Store heartbeat
-        storage["heartbeats"][account_id] = datetime.now().timestamp()
+        # Update heartbeat
+        trading_data["heartbeats"][account_id] = datetime.now().timestamp()
         
-        # If trade data included, store it
-        if "trade" in data:
-            trade_data = {
-                **data["trade"],
-                "account": account_id,
-                "server_timestamp": datetime.now().isoformat()
-            }
-            storage["trades"].append(trade_data)
-            
-            # Keep only last 100 trades
-            if len(storage["trades"]) > 100:
-                storage["trades"].pop(0)
-        
-        print(f"✅ MT5 Update: Account {account_id} - {data.get('event', 'update')}")
+        print(f"✅ MT5 Update: Account {account_id}")
         
         return {
             "status": "success",
@@ -103,99 +74,142 @@ async def receive_mt5_update(request: Request):
         
     except Exception as e:
         print(f"❌ Error: {str(e)}")
-        raise HTTPException(500, f"Internal server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/mt5/status")
-async def get_account_status(account: str = None):
-    """Mobile app fetches account status"""
+@app.get("/api/mt5")
+async def get_mt5_data(account: str = None):
+    """Mobile app fetches data from this endpoint"""
     try:
         if account:
             # Return specific account
-            if account in storage["accounts"]:
-                return storage["accounts"][account]
+            if account in trading_data["accounts"]:
+                return trading_data["accounts"][account]
             else:
-                raise HTTPException(404, f"Account {account} not found")
+                raise HTTPException(status_code=404, detail=f"Account {account} not found")
         else:
-            # Return all accounts
+            # Return all accounts with status
+            online_accounts = []
+            offline_accounts = []
+            
+            for acc_id, heartbeat in trading_data["heartbeats"].items():
+                is_online = (datetime.now().timestamp() - heartbeat) < 300  # 5 minutes
+                account_data = trading_data["accounts"].get(acc_id, {})
+                
+                if is_online:
+                    online_accounts.append({
+                        "account": acc_id,
+                        **account_data,
+                        "status": "online"
+                    })
+                else:
+                    offline_accounts.append({
+                        "account": acc_id,
+                        **account_data,
+                        "status": "offline"
+                    })
+            
             return {
-                "accounts": storage["accounts"],
-                "summary": {
-                    "total_accounts": len(storage["accounts"]),
-                    "online_accounts": sum(
-                        1 for hb in storage["heartbeats"].values() 
-                        if (datetime.now().timestamp() - hb) < 300  # 5 minutes
-                    ),
-                    "total_trades": len(storage["trades"])
-                }
+                "online": online_accounts,
+                "offline": offline_accounts,
+                "total": len(trading_data["accounts"])
             }
             
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/mt5/command")
+@app.post("/api/command")
 async def send_command(request: Request):
     """Mobile app sends commands to EA"""
     try:
         data = await request.json()
         
-        # Validate command
-        required_fields = ["account", "command", "action"]
+        # Validate
+        required_fields = ["account", "action"]
         for field in required_fields:
             if field not in data:
-                raise HTTPException(400, f"Missing '{field}' field")
+                raise HTTPException(status_code=400, detail=f"Missing '{field}' field")
         
-        # Store command for EA to poll
-        command_id = hashlib.md5(f"{data['account']}{datetime.now()}".encode()).hexdigest()[:8]
+        # Generate command ID
+        import hashlib
+        cmd_id = hashlib.md5(f"{data['account']}{datetime.now()}".encode()).hexdigest()[:8]
         
-        command_entry = {
-            "id": command_id,
+        command = {
+            "id": cmd_id,
             **data,
             "created_at": datetime.now().isoformat(),
             "status": "pending",
             "executed": False
         }
         
-        storage["commands"].append(command_entry)
+        # Store command
+        trading_data["commands"].append(command)
         
-        # Keep only recent commands
-        if len(storage["commands"]) > 50:
-            storage["commands"].pop(0)
+        # Keep only last 50 commands
+        if len(trading_data["commands"]) > 50:
+            trading_data["commands"].pop(0)
         
-        print(f"📱 Command: {data['account']} - {data['command']} - {data['action']}")
+        print(f"📱 Command: {data['account']} - {data['action']}")
         
         return {
             "status": "queued",
-            "command_id": command_id,
+            "command_id": cmd_id,
             "message": f"Command '{data['action']}' queued for account {data['account']}"
         }
         
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/mt5/commands")
-async def get_pending_commands(account: str):
-    """EA polls for pending commands"""
+@app.get("/api/commands")
+async def get_commands(account: str):
+    """EA polls for commands from this endpoint"""
     try:
-        pending = [
-            cmd for cmd in storage["commands"] 
+        if not account:
+            raise HTTPException(status_code=400, detail="Missing 'account' parameter")
+        
+        # Find pending commands for this account
+        pending_commands = [
+            cmd for cmd in trading_data["commands"]
             if cmd["account"] == account and not cmd["executed"]
         ]
         
-        # Mark as executed (EA will process)
-        for cmd in pending:
+        # Mark as executed (EA will process them)
+        for cmd in pending_commands:
             cmd["executed"] = True
             cmd["executed_at"] = datetime.now().isoformat()
         
         return {
             "account": account,
-            "pending_commands": len(pending),
-            "commands": pending
+            "pending_count": len(pending_commands),
+            "commands": pending_commands
         }
         
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/test")
+async def test_endpoint():
+    """Test endpoint to verify server is working"""
+    return {
+        "message": "MT5 Bridge Server is working!",
+        "timestamp": datetime.now().isoformat(),
+        "sample_request": {
+            "method": "POST",
+            "url": "/api/mt5",
+            "body": {
+                "account": "123456",
+                "balance": 10000.50,
+                "equity": 10123.45,
+                "profit": 123.45,
+                "open_trades": 3,
+                "event": "heartbeat"
+            }
+        }
+    }
+
+# Start server
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 3000))
     print(f"🚀 Starting MT5 Bridge Server on port {port}")
+    print(f"📡 Server will be available at: http://localhost:{port}")
+    print(f"⏰ Started at: {datetime.now().isoformat()}")
     uvicorn.run(app, host="0.0.0.0", port=port)
