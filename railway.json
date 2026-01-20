@@ -2,14 +2,24 @@
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "pip install -r requirements.txt"
+    "buildCommand": "pip install -r requirements.txt",
+    "watchPatterns": ["server.py", "requirements.txt"]
   },
   "deploy": {
     "startCommand": "python server.py",
-    "healthcheckPath": "/health",
+    "healthcheckPath": "/",
     "healthcheckTimeout": 60,
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10,
-    "public": true
+    "restartPolicyMaxRetries": 5,
+    "envVars": {
+      "PORT": "3000"
+    }
+  },
+  "environments": {
+    "production": {
+      "deploy": {
+        "numReplicas": 1
+      }
+    }
   }
 }
