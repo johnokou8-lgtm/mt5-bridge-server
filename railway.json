@@ -8,18 +8,8 @@
   "deploy": {
     "startCommand": "python server.py",
     "healthcheckPath": "/",
-    "healthcheckTimeout": 60,
+    "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 5,
-    "envVars": {
-      "PORT": "3000"
-    }
-  },
-  "environments": {
-    "production": {
-      "deploy": {
-        "numReplicas": 1
-      }
-    }
+    "restartPolicyMaxRetries": 3
   }
 }
